@@ -1,0 +1,43 @@
+test_directory_structure (tests.test_syntax.TestFileStructure.test_directory_structure)
+Test that all required directories exist ... ok
+test_init_files (tests.test_syntax.TestFileStructure.test_init_files)
+Test that __init__.py files exist where needed ... ok
+test_all_verilog_files_exist (tests.test_syntax.TestSyntax.test_all_verilog_files_exist)
+Test that all Verilog files exist ... ok
+test_at86rf215_syntax (tests.test_syntax.TestSyntax.test_at86rf215_syntax)
+Test AT86RF215 module syntax ... ok
+test_documentation_exists (tests.test_syntax.TestSyntax.test_documentation_exists)
+Test that documentation files exist ... ok
+test_max2771_syntax (tests.test_syntax.TestSyntax.test_max2771_syntax)
+Test MAX2771 module syntax ... ok
+test_platform_syntax (tests.test_syntax.TestSyntax.test_platform_syntax)
+Test platform file syntax ... ok
+test_soc_syntax (tests.test_syntax.TestSyntax.test_soc_syntax)
+Test SoC file syntax ... ok
+test_verilog_module_declarations (tests.test_syntax.TestSyntax.test_verilog_module_declarations)
+Test that Verilog files have proper module declarations ... ok
+test_module_headers (tests.test_verilog_lint.TestVerilogDocumentation.test_module_headers)
+Test that modules have documentation headers ... ok
+test_blocking_vs_nonblocking (tests.test_verilog_lint.TestVerilogLint.test_blocking_vs_nonblocking)
+Test proper use of blocking vs non-blocking assignments ... ok
+test_clock_and_reset (tests.test_verilog_lint.TestVerilogLint.test_clock_and_reset)
+Test that modules have clock and reset inputs ... ok
+test_fifo_usage (tests.test_verilog_lint.TestVerilogLint.test_fifo_usage)
+Test that FIFO modules are properly instantiated ... ok
+test_gray_code_synchronizers (tests.test_verilog_lint.TestVerilogLint.test_gray_code_synchronizers)
+Test that async FIFOs use Gray code pointers ... ok
+test_module_parameters (tests.test_verilog_lint.TestVerilogLint.test_module_parameters)
+Test that parameterized modules have valid parameter syntax ... ok
+test_no_latches (tests.test_verilog_lint.TestVerilogLint.test_no_latches)
+Test that there are no inferred latches (common error) ... ok
+test_no_syntax_errors_basic (tests.test_verilog_lint.TestVerilogLint.test_no_syntax_errors_basic)
+Test for basic syntax errors in Verilog files ... ok
+test_no_tabs (tests.test_verilog_lint.TestVerilogLint.test_no_tabs)
+Test that Verilog files use spaces, not tabs ... ok
+test_signal_declarations (tests.test_verilog_lint.TestVerilogLint.test_signal_declarations)
+Test that signals are properly declared ... ok
+
+----------------------------------------------------------------------
+Ran 19 tests in 0.026s
+
+OK
