@@ -1,13 +1,17 @@
 """
-Vahya Platform Definition
+Vahya Platform Definition (LiteX/Migen wrapper)
 
-Hardware Specifications:
-- FPGA: Lattice ECP5 (LFE5U-25F or LFE5U-45F)
+Based on Vahya v1.0b hardware:
+- FPGA: Lattice ECP5 LFE5U-25F-7BG256C
 - USB PHY: USB3343 ULPI (High-Speed USB 2.0)
-- Flash: SPI Flash (8-32 MB)
-- RF Transceiver: AT86RF215 (Sub-GHz/2.4GHz dual-band)
-- GPS Frontend: MAX2771 (Multi-GNSS receiver)
-- Clock: 30 MHz oscillator
+- Flash: SPI Flash (onboard ECP5 configuration flash)
+- RF Transceiver: AT86RF215 (Sub-GHz/2.4GHz dual-band) - EXTERNAL
+- GPS Frontend: MAX2771 (Multi-GNSS receiver) - EXTERNAL
+- Clock: 26 MHz oscillator
+
+Note: This is a LiteX/Migen platform wrapper. The native Amaranth platform
+is in the main repository. Pin assignments for AT86RF215 and MAX2771 are
+placeholders and must be verified against actual hardware connections.
 """
 
 from migen import *
@@ -18,33 +22,30 @@ from litex.build.lattice.programmer import OpenOCDJTAGProgrammer
 # IOs ---------------------------------------------------------------------
 
 _io = [
-    # Clocking
-    ("clk30", 0, Pins("L16"), IOStandard("LVCMOS33")),
+    # Clocking (26 MHz main oscillator)
+    ("clk26", 0, Pins("J14"), IOStandard("LVCMOS33")),
 
-    # LEDs (assuming 4 user LEDs)
-    ("user_led", 0, Pins("N12"), IOStandard("LVCMOS33")),
-    ("user_led", 1, Pins("P12"), IOStandard("LVCMOS33")),
-    ("user_led", 2, Pins("R12"), IOStandard("LVCMOS33")),
-    ("user_led", 3, Pins("T12"), IOStandard("LVCMOS33")),
-
-    # Serial (UART) - Primary debug interface
-    ("serial", 0,
-        Subsignal("tx", Pins("C11")),
-        Subsignal("rx", Pins("A10")),
-        IOStandard("LVCMOS33")
+    # RGB LED (common anode)
+    ("rgb_led", 0,
+        Subsignal("r", Pins("B13"), IOStandard("LVCMOS33")),
+        Subsignal("g", Pins("B14"), IOStandard("LVCMOS33")),
+        Subsignal("b", Pins("B12"), IOStandard("LVCMOS33")),
     ),
 
-    # ULPI USB PHY (USB3343)
+    # User switch
+    ("user_sw", 0, Pins("N6"), IOStandard("LVCMOS33")),
+
+    # ULPI USB PHY (USB3343) - Actual Vahya v1.0b pinout
     ("ulpi", 0,
-        Subsignal("rst_n",  Pins("T4"), IOStandard("LVCMOS33")),
-        Subsignal("clk_o",  Pins("R5"), IOStandard("LVCMOS33")),  # 60 MHz from PHY
-        Subsignal("dir",    Pins("T3"), IOStandard("LVCMOS33")),
-        Subsignal("nxt",    Pins("R3"), IOStandard("LVCMOS33")),
-        Subsignal("stp",    Pins("R4"), IOStandard("LVCMOS33")),
-        Subsignal("data",   Pins("T2 R2 R1 P2 P1 N1 M2 M1"), IOStandard("LVCMOS33")),
+        Subsignal("data",  Pins("G1 F2 F1 E2 E1 D1 C2 C1"), IOStandard("LVCMOS33")),
+        Subsignal("clk",   Pins("K1"), IOStandard("LVCMOS33")),  # 60 MHz from PHY
+        Subsignal("dir",   Pins("J5"), IOStandard("LVCMOS33")),
+        Subsignal("nxt",   Pins("G2"), IOStandard("LVCMOS33")),
+        Subsignal("stp",   Pins("J4"), IOStandard("LVCMOS33")),
+        Subsignal("rst",   Pins("H2"), IOStandard("LVCMOS33")),  # Active low
     ),
 
-    # SPI Flash (Quad SPI)
+    # SPI Flash (Quad SPI) - TODO: Verify pin assignments
     ("spiflash4x", 0,
         Subsignal("cs_n", Pins("N8")),
         Subsignal("clk",  Pins("N9")),
@@ -52,8 +53,14 @@ _io = [
         IOStandard("LVCMOS33")
     ),
 
+    # =====================================================================
+    # EXTERNAL PERIPHERALS - Pin assignments are PLACEHOLDERS
+    # These must be verified against actual hardware connections!
+    # =====================================================================
+
     # AT86RF215 RF Transceiver Interface
     # Dual-band RF transceiver (Sub-GHz + 2.4GHz)
+    # NOTE: These pins are placeholders and must be updated!
     ("at86rf215", 0,
         # SPI Interface
         Subsignal("spi_clk",  Pins("A2"), IOStandard("LVCMOS33")),
@@ -87,6 +94,7 @@ _io = [
     ),
 
     # MAX2771 GNSS Frontend
+    # NOTE: These pins are placeholders and must be updated!
     ("max2771", 0,
         # SPI Interface
         Subsignal("spi_clk",  Pins("C7"), IOStandard("LVCMOS33")),
@@ -111,7 +119,12 @@ _io = [
         Subsignal("clk_ref",  Pins("P7"), IOStandard("LVCMOS33")),
     ),
 
+    # =====================================================================
+    # Optional peripherals (if available on expansion connector)
+    # =====================================================================
+
     # I2C (for peripheral configuration/control)
+    # NOTE: Verify these pins are available!
     ("i2c", 0,
         Subsignal("scl", Pins("R7")),
         Subsignal("sda", Pins("T7")),
@@ -119,6 +132,7 @@ _io = [
     ),
 
     # Additional SPI buses for expansion
+    # NOTE: Verify these pins are available!
     ("spi", 0,
         Subsignal("clk",  Pins("A8")),
         Subsignal("mosi", Pins("B8")),
@@ -136,13 +150,14 @@ _io = [
     ),
 
     # Additional UARTs
-    ("serial", 1,
+    # NOTE: Verify these pins are available!
+    ("serial", 0,
         Subsignal("tx", Pins("J8")),
         Subsignal("rx", Pins("K8")),
         IOStandard("LVCMOS33")
     ),
 
-    ("serial", 2,
+    ("serial", 1,
         Subsignal("tx", Pins("L8")),
         Subsignal("rx", Pins("M8")),
         IOStandard("LVCMOS33")
@@ -162,16 +177,16 @@ _connectors = [
 # Platform -----------------------------------------------------------------
 
 class Platform(LatticePlatform):
-    """Vahya Platform - ECP5 based SDR and GNSS platform"""
+    """Vahya Platform - ECP5 based SDR and GNSS platform (LiteX wrapper)"""
 
-    default_clk_name   = "clk30"
-    default_clk_period = 1e9/30e6  # 30 MHz
+    default_clk_name   = "clk26"
+    default_clk_period = 1e9/26e6  # 26 MHz
 
     def __init__(self, device="LFE5U-25F", toolchain="trellis", **kwargs):
         assert device in ["LFE5U-25F", "LFE5U-45F"]
         LatticePlatform.__init__(
             self,
-            device + "-8BG256C",
+            device + "-7BG256C",  # Updated to match actual part (speed grade 7)
             _io,
             _connectors,
             toolchain=toolchain,
@@ -179,19 +194,28 @@ class Platform(LatticePlatform):
         )
 
     def create_programmer(self):
+        """
+        Returns OpenOCD programmer for JTAG.
+        Note: Vahya v1.0b uses FTP/MicroPython programming. This is for
+        direct JTAG access if available.
+        """
         return OpenOCDJTAGProgrammer("openocd_ecp5.cfg")
 
     def do_finalize(self, fragment):
         LatticePlatform.do_finalize(self, fragment)
 
         # Timing constraints
-        self.add_period_constraint(self.lookup_request("clk30", loose=True), 1e9/30e6)
+        self.add_period_constraint(self.lookup_request("clk26", loose=True), 1e9/26e6)
 
         # USB ULPI clock (60 MHz from PHY)
-        self.add_period_constraint(self.lookup_request("ulpi:clk_o", loose=True), 1e9/60e6)
+        self.add_period_constraint(self.lookup_request("ulpi:clk", loose=True), 1e9/60e6)
 
         # MAX2771 sample clock (~16 MHz, varies with config)
-        self.add_period_constraint(self.lookup_request("max2771:clkout", loose=True), 1e9/16.368e6)
+        # Only add if MAX2771 is actually requested
+        try:
+            self.add_period_constraint(self.lookup_request("max2771:clkout", loose=True), 1e9/16.368e6)
+        except:
+            pass  # MAX2771 not used
 
     def get_flash_module(self):
         """Return SPI flash module info"""

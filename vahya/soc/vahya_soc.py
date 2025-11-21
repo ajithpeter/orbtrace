@@ -47,7 +47,7 @@ from orbtrace.flash_uid import FlashUID
 # CRG -----------------------------------------------------------------------
 
 class _CRG(Module):
-    """Clock and Reset Generator for Vahya"""
+    """Clock and Reset Generator for Vahya v1.0b"""
     def __init__(self, platform, sys_clk_freq):
         self.rst = Signal()
         self.clock_domains.cd_sys    = ClockDomain()
@@ -55,20 +55,20 @@ class _CRG(Module):
         self.clock_domains.cd_usb    = ClockDomain()
         self.clock_domains.cd_por    = ClockDomain(reset_less=True)
 
-        # Get clocks
-        clk30 = platform.request("clk30")
+        # Get 26 MHz clock
+        clk26 = platform.request("clk26")
 
         # Power-on reset
         por_count = Signal(16, reset=2**16-1)
         por_done  = Signal()
-        self.comb += self.cd_por.clk.eq(clk30)
+        self.comb += self.cd_por.clk.eq(clk26)
         self.comb += por_done.eq(por_count == 0)
         self.sync.por += If(~por_done, por_count.eq(por_count - 1))
 
-        # PLL for system clocks
+        # PLL for system clocks (26 MHz input)
         self.submodules.pll = pll = ECP5PLL()
         self.comb += pll.reset.eq(~por_done | self.rst)
-        pll.register_clkin(clk30, 30e6)
+        pll.register_clkin(clk26, 26e6)  # Updated to 26 MHz
         pll.create_clkout(self.cd_sys,   sys_clk_freq)
         pll.create_clkout(self.cd_sys2x, 2*sys_clk_freq)
         pll.create_clkout(self.cd_usb,   60e6)  # USB requires 60 MHz
@@ -104,12 +104,14 @@ class VahyaSoC(SoCCore):
         # Clock Reset Generator
         self.submodules.crg = _CRG(platform, sys_clk_freq)
 
-        # LED Chaser for status indication
+        # RGB LED for status indication
+        # Note: Vahya v1.0b has a single RGB LED, not multiple user LEDs
         if with_led_chaser:
-            self.submodules.leds = LedChaser(
-                pads         = platform.request_all("user_led"),
-                sys_clk_freq = sys_clk_freq
-            )
+            # Use RGB LED red channel as a heartbeat
+            rgb_led = platform.request("rgb_led")
+            led_counter = Signal(26)
+            self.sync += led_counter.eq(led_counter + 1)
+            self.comb += rgb_led.r.eq(led_counter[25])  # ~0.7 Hz blink
 
         # Flash UID for USB serial number
         self.submodules.flash_uid = FlashUID(uid_bytes=8)

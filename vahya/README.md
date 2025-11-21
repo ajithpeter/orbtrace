@@ -12,36 +12,43 @@ Vahya is a Software-Defined Radio (SDR) and GNSS platform based on the Lattice E
 ## Hardware Specifications
 
 ### FPGA
-- **Model**: Lattice ECP5 LFE5U-25F or LFE5U-45F
-- **Package**: BG256C (256-ball BGA)
-- **Clock**: 30 MHz main oscillator
-- **Flash**: SPI Flash (8-32 MB, Quad SPI)
-
-### RF & Wireless
-- **AT86RF215**: Dual-band RF transceiver
-  - Sub-GHz band (RF09): 389-1088 MHz
-  - 2.4GHz band (RF24): 2400-2483.5 MHz
-  - 14-bit I/Q data interface per band
-  - SPI control interface
-  - 26 MHz reference clock
-
-- **MAX2771**: GNSS frontend
-  - Multi-GNSS support (GPS, GLONASS, Galileo, BeiDou)
-  - 2-bit I/Q ADC output
-  - Configurable sample rate (~16 MHz typical)
-  - SPI configuration interface
+- **Model**: Lattice ECP5 LFE5U-25F-7BG256C (actual Vahya v1.0b hardware)
+- **Package**: BG256 (256-ball BGA)
+- **Speed Grade**: 7
+- **Clock**: 26 MHz main oscillator
+- **Flash**: SPI Flash (onboard configuration flash)
 
 ### USB
 - **PHY**: USB3343 ULPI (USB 2.0 High-Speed)
 - **Speed**: 480 Mbps
 - **Interfaces**: CDC-ACM serial, DFU, Bulk streaming
 
-### Peripherals
-- 3× UART interfaces
-- 2× SPI master interfaces
-- 1× I2C master interface
-- 4× User LEDs
-- GPIO expansion
+### Base Board Peripherals
+- **RGB LED**: Single common-anode RGB LED for status indication
+- **User Switch**: One user-accessible switch
+- **GPIO**: Available on expansion connectors
+
+### External/Expansion Peripherals
+The following peripherals are designed as external modules that can be connected
+via expansion connectors. **Pin assignments in the code are placeholders and must
+be verified/updated based on actual hardware connections:**
+
+- **AT86RF215** (optional): Dual-band RF transceiver
+  - Sub-GHz band (RF09): 389-1088 MHz
+  - 2.4GHz band (RF24): 2400-2483.5 MHz
+  - 14-bit I/Q data interface per band
+  - SPI control interface
+  - 26 MHz reference clock
+
+- **MAX2771** (optional): GNSS frontend
+  - Multi-GNSS support (GPS, GLONASS, Galileo, BeiDou)
+  - 2-bit I/Q ADC output
+  - Configurable sample rate (~16 MHz typical)
+  - SPI configuration interface
+
+- **Additional UARTs**: 2× additional UART interfaces (via expansion)
+- **Additional SPI**: 2× SPI master interfaces (via expansion)
+- **I2C**: I2C master interface (via expansion)
 
 ## Architecture
 
@@ -169,11 +176,32 @@ python vahya_soc.py --build --with-dfu --usb-vid 0x1209 --usb-pid 0x5070
 
 ### 3. Load to FPGA
 
+#### Option A: Vahya v1.0b FTP/MicroPython Programming (Recommended)
+
+The actual Vahya v1.0b hardware uses FTP upload and MicroPython REPL for programming:
+
+**Prerequisites**:
+```bash
+# Set environment variables
+export VahyaPlatformIP="192.168.4.1"    # Vahya's IP address
+export VahyaPlatformTTY="/dev/ttyUSB0"  # Serial port for MicroPython REPL
+
+# Install dependencies
+pip install pyserial
+```
+
+**Programming**:
+The bitstream will be compressed (.bit.gz), uploaded via FTP, and programmed
+via MicroPython commands automatically. See the actual `vahyaplatform.py` for
+implementation details.
+
+#### Option B: JTAG Programming (if available)
+
 ```bash
 python vahya_soc.py --load
 ```
 
-Or manually with OpenOCD:
+Or manually with OpenOCD (requires JTAG access):
 ```bash
 openocd -f openocd_ecp5.cfg -c "transport select jtag; init; svf build/vahya/gateware/vahya.svf; exit"
 ```
