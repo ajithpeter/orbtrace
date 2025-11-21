@@ -1404,3 +1404,589 @@ Instance('DCSC',
 - `_slip_hr2x`: Align sys2x clock
 - `_slip_hr2x90`: Align sys2x_90 clock
 
+---
+
+## Build System
+
+### Build Tool: PDM (Python Development Master)
+
+**File:** [`pyproject.toml`](pyproject.toml)
+
+```toml
+[project]
+name = "orbtrace"
+requires-python = ">=3.10"
+
+[project.scripts]
+orbtrace_builder = "orbtrace_builder:main"
+
+[tool.pdm.scripts]
+test.cmd = "pytest tests/"
+```
+
+### Build Process
+
+**Entry Point:** [`orbtrace_builder.py`](orbtrace_builder.py)
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                   Build Process Flow                           │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Parse Command-Line Arguments                               │
+│     • --platform {orbtrace_mini, ecpix5}                       │
+│     • --device {25F, 45F, 85F}                                 │
+│     • --sys-clk-freq (default: 75e6)                           │
+│     • --profile {default, dfu, test}                           │
+│     • Feature flags: --with-{debug,trace,target-power,dfu}     │
+│                                                                 │
+│  2. Import Platform Module                                     │
+│     from orbtrace.platforms.{platform} import Platform         │
+│                                                                 │
+│  3. Create Platform Instance                                   │
+│     platform = Platform(device={device}, toolchain='trellis')  │
+│                                                                 │
+│  4. Instantiate SoC                                            │
+│     soc = OrbSoC(platform, sys_clk_freq, **config)            │
+│                                                                 │
+│  5. Create LiteX Builder                                       │
+│     builder = Builder(soc, **builder_argdict(args))           │
+│     builder.add_software_package('liblitehyperbus')           │
+│     builder.add_software_library('liblitehyperbus')           │
+│                                                                 │
+│  6. Build Gateware + Firmware                                  │
+│     builder.build(**trellis_argdict(args), run=args.build)    │
+│                                                                 │
+│     ┌──────────────────────────────────────────────────────┐  │
+│     │  Yosys Synthesis                                     │  │
+│     │  • Read Python HDL (Migen/Amaranth)                  │  │
+│     │  • Read Verilog modules                              │  │
+│     │  • Synthesize to ECP5 primitives                     │  │
+│     │  • Output: netlist.json                              │  │
+│     └────────────────────┬─────────────────────────────────┘  │
+│                          │                                     │
+│                          ▼                                     │
+│     ┌──────────────────────────────────────────────────────┐  │
+│     │  nextpnr-ecp5 Place & Route                         │  │
+│     │  • Input: netlist.json                               │  │
+│     │  • Apply constraints (timing, pin assignments)       │  │
+│     │  • Place cells, route nets                           │  │
+│     │  • Output: {name}_out.config                         │  │
+│     └────────────────────┬─────────────────────────────────┘  │
+│                          │                                     │
+│                          ▼                                     │
+│     ┌──────────────────────────────────────────────────────┐  │
+│     │  ecppack Bitstream Generation                        │  │
+│     │  • Input: {name}_out.config                          │  │
+│     │  • Parameters:                                        │  │
+│     │    - bootaddr: 0x0 (bootloader) / 0x100000 (app)    │  │
+│     │    - freq: 62.0 MHz                                  │  │
+│     │    - compress: true                                  │  │
+│     │  • Output: {name}.bit                                │  │
+│     └──────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  7. Optional: Program Device                                   │
+│     • DFU: dfu-util -d 1209:3442 -a 1 -D {name}.bit           │
+│     • openFPGALoader: -c ft232 -f -o {offset} {name}.bit      │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Build Profiles
+
+**File:** [`orbtrace_builder.py`](orbtrace_builder.py) - Lines 20-56
+
+#### Default Profile
+```python
+{
+    'uart_name': 'stream',
+    'with_debug': True,
+    'with_trace': True,
+    'with_target_power': True,
+    'with_dfu': False,
+    'usb_vid': 0x1209,
+    'usb_pid': 0x3443,
+    'ecppack_bootaddr': '0x0',
+    'ecppack_freq': 62.0,
+    'ecppack_compress': True,
+}
+```
+
+#### DFU Bootloader Profile
+```python
+{
+    'uart_name': 'stream',
+    'with_debug': False,
+    'with_trace': False,
+    'with_target_power': False,
+    'with_dfu': 'bootloader',
+    'usb_pid': 0x3442,
+    'bootloader_auto_reset': True,
+    'ecppack_bootaddr': '0x100000',
+    'output_dir': 'build/orbtrace_mini_dfu',
+}
+```
+
+#### Test Profile
+```python
+{
+    'with_test_io': True,
+    'with_reset_csr': True,
+    'usb_pid': 0x0001,
+    'output_dir': 'build/orbtrace_mini_test',
+}
+```
+
+### Build Output Structure
+
+```
+build/
+├── orbtrace_mini/
+│   ├── gateware/
+│   │   ├── orbtrace_mini.bit      # FPGA bitstream
+│   │   ├── orbtrace_mini.config   # Place & route config
+│   │   ├── orbtrace_mini.json     # Synthesized netlist
+│   │   ├── orbtrace_mini_out.config # Final placed design
+│   │   ├── csr.csv                # CSR register map
+│   │   └── mem.h                  # Memory map header
+│   └── software/
+│       └── (optional firmware if CPU enabled)
+│
+├── orbtrace_mini_dfu/
+│   └── gateware/
+│       └── orbtrace_mini.bit      # Bootloader bitstream
+│
+└── orbtrace_mini_test/
+    └── gateware/
+        └── orbtrace_mini.bit      # Test configuration
+```
+
+### Dependencies
+
+**Core Tools:**
+- Yosys (Verilog synthesis)
+- nextpnr-ecp5 (Place & route)
+- Project Trellis (ECP5 database)
+- RISC-V GCC toolchain (for embedded firmware)
+
+**Python Packages:**
+- amaranth == 0.5.4
+- luna-usb == 0.2.0
+- migen (from git)
+- litex == 2023.12
+- litex-boards, litespi, litehyperbus
+
+**Installation:**
+```bash
+# Recommended: OSS CAD Suite (all-in-one)
+wget https://github.com/YosysHQ/oss-cad-suite-build/releases/download/latest/oss-cad-suite-linux-x64.tgz
+tar xzf oss-cad-suite-linux-x64.tgz
+source oss-cad-suite/environment
+
+# Python dependencies
+pdm install
+```
+
+---
+
+## Testing Infrastructure
+
+### Test Framework
+
+**Framework:** pytest >= 8.3.5
+
+**Test Execution:**
+```bash
+pdm test  # Runs pytest tests/
+```
+
+### Test Structure
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                   Testing Architecture                         │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Python Tests (Amaranth Simulation)                            │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  tests/test_tpiu.py                                      │ │
+│  │  • TPIUSync frame alignment                              │ │
+│  │  • Packetizer timeout behavior                           │ │
+│  │  • TPIUDemux channel tracking                            │ │
+│  │  • ITM "Hello World" decode                              │ │
+│  │                                                           │ │
+│  │  tests/test_swo.py                                       │ │
+│  │  • PulseLengthCapture edge detection                     │ │
+│  │  • ManchesterDecoder synchronization                     │ │
+│  │                                                           │ │
+│  │  tests/test_cobs.py                                      │ │
+│  │  • COBSEncoder correctness vs reference implementation   │ │
+│  │                                                           │ │
+│  │  tests/test_stream_utils.py                              │ │
+│  │  • Serializer array-to-element conversion                │ │
+│  │                                                           │ │
+│  │  tests/sim_helpers.py                                    │ │
+│  │  • stream_put/get (async testbench helpers)              │ │
+│  │  • send_packet/recv_packet (framing helpers)             │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  Verilog Testbenches (Icarus Verilog)                         │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  verilog/testbeds/swdIF_tb.v                             │ │
+│  │  • Simple read/write transactions                         │ │
+│  │  • Parity error detection                                 │ │
+│  │  • WAIT response handling                                 │ │
+│  │                                                           │ │
+│  │  verilog/testbeds/jtagIF_TB.v                            │ │
+│  │  • JTAG chain configuration                              │ │
+│  │  • IR/DR scanning                                         │ │
+│  │  • Multi-device support                                   │ │
+│  │                                                           │ │
+│  │  verilog/testbeds/traceIF_tb.v                           │ │
+│  │  • 1/2/4-bit parallel trace                              │ │
+│  │  • Sync sequence detection                                │ │
+│  │  • DDR capture timing                                     │ │
+│  │                                                           │ │
+│  │  verilog/testbeds/dbgIF_tb.v                             │ │
+│  │  • Command interface                                      │ │
+│  │  • Mode switching (SWD↔JTAG)                             │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Amaranth Simulation Pattern
+
+**File:** [`tests/test_tpiu.py`](tests/test_tpiu.py)
+
+```python
+def test_packetizer():
+    dut = tpiu.Packetizer(timeout=2000)
+    sim = Simulator(dut)
+    sim.add_clock(1e-6)  # 1 MHz clock
+
+    @sim.add_testbench
+    async def input_testbench(ctx):
+        # Send test data
+        for i in range(1536):
+            await send_packet(ctx, dut.input, [1, i & 0xff])
+
+    @sim.add_testbench
+    async def output_testbench(ctx):
+        # Verify output
+        assert await recv_packet(ctx, dut.output) == [1, *range(1024)]
+        assert await recv_packet(ctx, dut.output) == [1, *range(512)]
+
+    @sim.add_process
+    async def timeout(ctx):
+        await ctx.tick().repeat(10000)
+        raise TimeoutError()
+
+    sim.run()
+```
+
+### CI/CD Pipeline
+
+**File:** [`.github/workflows/build.yml`](.github/workflows/build.yml)
+
+```yaml
+jobs:
+  orbtrace_mini:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: YosysHQ/setup-oss-cad-suite@v3
+      - run: pdm install
+      - run: pdm run orbtrace_builder --platform orbtrace_mini --build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbtrace_mini
+          path: build/orbtrace_mini/gateware/*.bit
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: YosysHQ/setup-oss-cad-suite@v3
+      - run: pdm install -dG test
+      - run: pdm test
+```
+
+---
+
+## Platform Support
+
+### Supported Platforms
+
+#### 1. ORBTrace Mini (Production Hardware)
+
+**File:** [`orbtrace/platforms/orbtrace_mini.py`](orbtrace/platforms/orbtrace_mini.py)
+
+**FPGA:** Lattice ECP5 LFE5U-25F-8BG256C / LFE5U-45F-8BG256C
+
+**Key Features:**
+- 30 MHz input oscillator
+- USB3343 ULPI PHY (High-Speed USB 2.0)
+- 8 MB HyperRAM
+- 8 MB Quad SPI Flash
+- 5× RGB LEDs (WS2812-style serial)
+- Debug connector (JTAG/SWD/Trace)
+- Target power control (VTREF/VTPWR)
+- 6× GPIO pins
+
+**Pin Assignments:**
+```
+Debug Interface:
+├─ JTCK/SWCLK:  B13
+├─ JTMS/SWDIO:  A14
+├─ JTDO/SWO:    B12
+├─ JTDI:        A12
+└─ nRST:        A11
+
+Trace Interface:
+├─ TRACECLK:    C8
+└─ TRACEDATA:   A10, B9, A9, B8 (4-bit)
+
+Target Power:
+├─ VTREF_EN:    C6
+├─ VTREF_SEL:   D6
+├─ VTPWR_EN:    D4
+└─ VTPWR_SEL:   C4
+```
+
+#### 2. ECPIX-5 (Development Platform)
+
+**File:** [`orbtrace/platforms/ecpix5.py`](orbtrace/platforms/ecpix5.py)
+
+**FPGA:** Lattice ECP5 LFE5U-85F
+
+**Features:**
+- 100 MHz input oscillator
+- PMOD connectors for debug/trace
+- Onboard RGB LEDs
+- Development/prototyping platform
+
+### Platform-Specific Code
+
+**Platform Factory Pattern:**
+```python
+# orbtrace_builder.py
+platform_module = importlib.import_module(f'orbtrace.platforms.{args.platform}')
+platform = platform_module.Platform(device=args.device, toolchain='trellis')
+
+# Platform provides
+def get_crg(self, sys_clk_freq):
+    """Return Clock/Reset Generator for this platform"""
+
+def add_platform_specific(self, soc):
+    """Add platform-specific peripherals (I2C, HyperRAM, etc.)"""
+```
+
+---
+
+## Development Workflow
+
+### Quick Start
+
+```bash
+# 1. Clone repository
+git clone https://github.com/orbcode/orbtrace.git
+cd orbtrace
+
+# 2. Install toolchain
+# Option A: OSS CAD Suite (recommended)
+wget https://github.com/YosysHQ/oss-cad-suite-build/releases/latest/download/oss-cad-suite-linux-x64.tgz
+tar xzf oss-cad-suite-linux-x64.tgz
+source oss-cad-suite/environment
+
+# Option B: System packages
+sudo apt install yosys nextpnr-ecp5 prjtrellis
+
+# 3. Install Python dependencies
+pip install pdm
+pdm install
+
+# 4. Build gateware
+pdm run orbtrace_builder --platform orbtrace_mini --build
+
+# 5. Program device
+# Via DFU (hold boot button, power on - purple LED)
+dfu-util -d 1209:3442 -a 1 -D build/orbtrace_mini/gateware/orbtrace_mini.bit
+
+# 6. Test
+orbtrace_util --input-format 4  # Configure 4-bit trace
+```
+
+### Development Cycle
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                   Development Workflow                         │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Make Changes                                               │
+│     • Edit Python HDL (Amaranth/Migen)                         │
+│     • Edit Verilog (for protocol engines)                      │
+│     • Update tests                                             │
+│                                                                 │
+│  2. Run Tests                                                  │
+│     pdm test                                                   │
+│                                                                 │
+│  3. Build Gateware                                             │
+│     pdm run orbtrace_builder --platform orbtrace_mini --build  │
+│     • Check build logs for warnings/errors                     │
+│     • Review timing reports (nextpnr)                          │
+│                                                                 │
+│  4. Program Device                                             │
+│     # Application (runs from 0x100000)                         │
+│     dfu-util -d 1209:3442 -a 1 -D build/orbtrace_mini/gateware/orbtrace_mini.bit
+│                                                                 │
+│     # Bootloader (runs from 0x0)                               │
+│     openFPGALoader -c ft232 -f -o 0x0 build/orbtrace_mini_dfu/gateware/orbtrace_mini.bit
+│                                                                 │
+│  5. Test on Hardware                                           │
+│     • Connect to target device                                 │
+│     • Use OpenOCD/pyOCD for debug                              │
+│     • Capture trace with orbuculum tools                       │
+│                                                                 │
+│  6. Debug Issues                                               │
+│     • Check USB enumeration (lsusb)                            │
+│     • Monitor serial LEDs (status indicators)                  │
+│     • Use orbtrace_util for configuration                      │
+│     • Check CSR registers via USB bridge                       │
+│                                                                 │
+│  7. Commit Changes                                             │
+│     git add .                                                  │
+│     git commit -m "description"                                │
+│     git push                                                   │
+│     • CI builds all profiles automatically                     │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Common Tasks
+
+#### Add New USB Interface
+1. Create request handler in `orbtrace/` (inherit from `USBRequestHandler`)
+2. Add interface descriptor in `soc.py::add_usb()`
+3. Register handler in `usb.add_control_endpoint()`
+4. Update WCID descriptors in `USBAllocator`
+
+#### Modify Trace Pipeline
+1. Edit Amaranth component in `orbtrace/trace/`
+2. Update integration in `trace/glue.py` if needed
+3. Add tests in `tests/test_*.py`
+4. Rebuild and verify with `orbtrace_util`
+
+#### Debug Verilog Modules
+1. Edit Verilog in `verilog/*.v`
+2. Run testbench: `iverilog -o r module.v testbed.v && vvp r`
+3. View waveforms: `gtkwave module.vcd`
+4. Rebuild gateware to include changes
+
+### Useful Commands
+
+```bash
+# Build profiles
+pdm run orbtrace_builder --platform orbtrace_mini --profile default --build
+pdm run orbtrace_builder --platform orbtrace_mini --profile dfu --build
+pdm run orbtrace_builder --platform orbtrace_mini --profile test --build
+
+# Feature flags
+pdm run orbtrace_builder --platform orbtrace_mini --with-debug --with-trace --build
+
+# Clean build
+rm -rf build/
+pdm run orbtrace_builder --platform orbtrace_mini --build
+
+# Run specific test
+pytest tests/test_tpiu.py::test_packetizer -v
+
+# Check USB device
+lsusb | grep 1209:3443  # Application
+lsusb | grep 1209:3442  # Bootloader
+
+# Configure trace
+orbtrace_util --input-format 3   # 4-bit parallel
+orbtrace_util --input-format 0x11 # Manchester + TPIU
+orbtrace_util --async-baudrate 2000000  # 2 Mbps async SWO
+
+# Target power
+orbtrace_util --vtref 3.3 --vtpwr on
+```
+
+---
+
+## Appendix: Key File Reference
+
+### Python Modules
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `orbtrace/soc.py` | 776 | Main SoC integration |
+| `orbtrace/debug/cmsis_dap.py` | 1,418 | CMSIS-DAP protocol FSM |
+| `orbtrace/trace/core.py` | 164 | Trace pipeline integration |
+| `orbtrace/trace/tpiu.py` | 238 | TPIU demultiplexer |
+| `orbtrace/trace/swo.py` | 263 | SWO decoders (Manchester/NRZ) |
+| `orbtrace/amaranth_glue/wrapper.py` | 83 | Migen-Amaranth bridge |
+| `orbtrace/usb_allocator.py` | 146 | USB resource management |
+| `orbtrace/crg_ecp5.py` | 159 | Clock/Reset generation |
+
+### Verilog Modules
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `verilog/dbgIF.v` | ~900 | Debug controller (SWD/JTAG) |
+| `verilog/swdIF.v` | ~320 | SWD protocol engine |
+| `verilog/jtagIF.v` | ~290 | JTAG protocol engine |
+| `verilog/traceIF.v` | ~175 | Parallel trace capture |
+
+### Configuration Files
+
+| File | Purpose |
+|------|---------|
+| `pyproject.toml` | Project metadata, dependencies |
+| `pdm.lock` | Locked dependency versions |
+| `.github/workflows/build.yml` | CI/CD configuration |
+| `REQUIREMENTS` | Toolchain requirements |
+
+---
+
+## Conclusion
+
+The ORBTrace project represents a sophisticated example of modern FPGA-based system design, demonstrating:
+
+- **Multi-HDL Integration**: Seamless cooperation between Amaranth, Migen, and Verilog
+- **Standards Compliance**: Full ARM ADIv5, CMSIS-DAP v2, and USB 2.0 specifications
+- **Modular Architecture**: Clean separation of debug, trace, and power subsystems
+- **Advanced Features**: DDR capture, multi-phase clocking, USB WCID support
+- **Professional Tooling**: Comprehensive build system, testing, and CI/CD
+- **Open Source**: Complete toolchain using Project Trellis and OSS CAD Suite
+
+The architecture enables high-performance trace capture (up to 480 Mbps) with simultaneous debug operations, making it suitable for professional embedded development and debugging workflows.
+
+### Key Innovations
+
+1. **CPU-less SoC**: Entire system controlled via USB, no embedded CPU overhead
+2. **Dual-protocol debugging**: Simultaneous CMSIS-DAP v1 and v2 support
+3. **Flexible trace capture**: Supports parallel TPIU and serial SWO with multiple encodings
+4. **Python-based HDL**: Leverages Amaranth for maintainable, testable gateware
+5. **Seamless Windows support**: Automatic driver installation via WCID descriptors
+
+### Performance Characteristics
+
+- **Trace Bandwidth**: 480 Mbps (4-bit @ 120 MHz DDR)
+- **SWO Sampling**: 500 MSps (250 MHz DDR)
+- **Debug Clock**: Configurable 195 kHz - 25 MHz
+- **USB Throughput**: High-Speed (480 Mbps)
+- **Latency**: <1ms end-to-end (trace to USB)
+
+---
+
+**Document Version:** 1.0
+**Last Updated:** 2025-11-21
+**Project Repository:** https://github.com/orbcode/orbtrace
+**Documentation:** https://orbtrace.readthedocs.io/
+
