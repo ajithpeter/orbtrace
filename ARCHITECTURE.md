@@ -308,3 +308,336 @@ orbtrace/
     └── build.yml
 ```
 
+---
+
+## Hardware Description Language Integration
+
+### The Amaranth-Migen Bridge Pattern
+
+The ORBTrace project employs a sophisticated integration strategy to combine three HDL frameworks seamlessly:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              HDL Integration Architecture                         │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Migen/LiteX Domain                          │    │
+│  │  (SoC Infrastructure, Bus, CSR, Platform I/O)           │    │
+│  ├─────────────────────────────────────────────────────────┤    │
+│  │  • SoCCore                                               │    │
+│  │  • Wishbone Bus                                          │    │
+│  │  • CSR registers                                         │    │
+│  │  • DDR/Tristate primitives                              │    │
+│  │  • Clock domain management                               │    │
+│  └───────────────────┬─────────────────────────────────────┘    │
+│                      │                                            │
+│                      ▼                                            │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │          Wrapper (Bidirectional Bridge)                  │    │
+│  │  File: orbtrace/amaranth_glue/wrapper.py                │    │
+│  ├─────────────────────────────────────────────────────────┤    │
+│  │  Key Methods:                                            │    │
+│  │  • connect(migen_sig, amaranth_sig)                     │    │
+│  │  • from_amaranth(sig) → Migen signal                    │    │
+│  │  • from_migen(sig) → Amaranth signal                    │    │
+│  │  • connect_domain(name) → Clock sync                     │    │
+│  │  • generate_verilog() → Verilog output                  │    │
+│  │  • get_instance() → Migen Instance                      │    │
+│  └───────────────────┬─────────────────────────────────────┘    │
+│                      │                                            │
+│                      ▼                                            │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Amaranth Domain                             │    │
+│  │  (Modern HDL for Complex Logic)                         │    │
+│  ├─────────────────────────────────────────────────────────┤    │
+│  │  • TraceCore (trace processing)                          │    │
+│  │  • CMSIS_DAP (protocol FSM)                             │    │
+│  │  • USBDevice (LUNA stack)                               │    │
+│  │  • USB Request Handlers                                  │    │
+│  │  • Stream processing components                          │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                                                                   │
+│  Integration Flow:                                                │
+│  ─────────────────────────────────────────────────────────────   │
+│                                                                   │
+│  1. Amaranth module created in wrapper.m                         │
+│  2. Signals connected between Migen and Amaranth                 │
+│  3. Verilog generated from Amaranth at finalization             │
+│  4. Verilog file added to platform sources                       │
+│  5. Migen Instance created to instantiate Verilog               │
+│  6. Signals wired through Instance ports                         │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Wrapper Implementation Details
+
+**File:** [`orbtrace/amaranth_glue/wrapper.py`](orbtrace/amaranth_glue/wrapper.py)
+
+```python
+class Wrapper(migen.Module):
+    """Bridge between Migen and Amaranth HDL frameworks"""
+
+    def __init__(self, platform, name='amaranth_wrapper'):
+        self.platform = platform
+        self.name = name
+        self.m = amaranth.Module()      # Amaranth module container
+        self.connections = []            # Signal mappings
+
+    def connect(self, migen_sig, amaranth_sig):
+        """Bidirectional signal connection"""
+        self.connections.append((migen_sig, amaranth_sig))
+
+    def connect_domain(self, name):
+        """Synchronize clock domains between frameworks"""
+        n = 'sync' if name == 'sys' else name
+        setattr(self.m.domains, n, amaranth.ClockDomain(n))
+        self.connect(migen.ClockSignal(name), amaranth.ClockSignal(n))
+        self.connect(migen.ResetSignal(name), amaranth.ResetSignal(n))
+```
+
+### Example: Trace Core Integration
+
+**File:** [`orbtrace/trace/glue.py`](orbtrace/trace/glue.py)
+
+```python
+class TraceCore(Module):
+    def __init__(self, platform, wrapper):
+        # Create Amaranth component
+        core_am = core.TraceCore()
+        wrapper.m.submodules += core_am
+
+        # Connect clock domains
+        wrapper.connect_domain('trace')    # Async trace clock
+        wrapper.connect_domain('swo2x')    # 250 MHz SWO oversampling
+        wrapper.connect_domain('swo')      # 125 MHz SWO processing
+
+        # Connect signals between Migen and Amaranth
+        wrapper.connect(trace_io.trace_a, core_am.trace_a)     # Migen → Amaranth
+        wrapper.connect(self.led_overrun, core_am.led_overrun) # Amaranth → Migen
+```
+
+### Verilog Integration Patterns
+
+Three approaches are used for Verilog integration:
+
+#### Pattern 1: Direct Migen Instance (Legacy)
+
+**File:** [`orbtrace/debug/dbgIF.py`](orbtrace/debug/dbgIF.py)
+
+```python
+from migen import *
+
+class DBGIF(Module):
+    def __init__(self, pads):
+        self.addr32 = Signal(2)
+        self.dwrite = Signal(32)
+
+        # Direct Verilog instantiation
+        self.specials += Instance(
+            "dbgIF",
+            i_rst = ResetSignal("debug"),
+            i_clk = ClockSignal("debug"),
+            i_addr32 = self.addr32,
+            o_dread = self.dread,
+            # ... all ports mapped
+        )
+```
+
+#### Pattern 2: Amaranth Instance (Modern)
+
+**File:** [`orbtrace/trace/core.py`](orbtrace/trace/core.py)
+
+```python
+from amaranth import *
+
+class TraceIF(wiring.Component):
+    def elaborate(self, platform):
+        m = Module()
+
+        m.submodules.traceif = Instance('traceIF',
+            i_traceClkin = ClockSignal(),
+            i_traceDina = self.trace_a,
+            o_Frame = frame,
+        )
+
+        return m
+```
+
+#### Pattern 3: Amaranth Wrapper Bridge (Hybrid)
+
+Allows Amaranth code to be used from Migen by generating intermediate Verilog.
+
+### Signal Flow Across HDL Boundaries
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│              Signal Flow Example: Trace Pipeline               │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Verilog (traceIF.v)                                           │
+│       │                                                         │
+│       ▼ Instance ports                                         │
+│  Amaranth (TraceIF component)                                  │
+│       │                                                         │
+│       ▼ wiring.Out() signals                                   │
+│  Amaranth (TraceCore component)                                │
+│       │                                                         │
+│       ▼ Wrapper.connect()                                      │
+│  Migen (TraceCore glue)                                        │
+│       │                                                         │
+│       ▼ LiteX Endpoint                                         │
+│  Migen (USB stream endpoint)                                   │
+│       │                                                         │
+│       ▼ Wrapper.connect()                                      │
+│  Amaranth (LUNA USB stack)                                     │
+│       │                                                         │
+│       ▼ Generated Verilog                                      │
+│  Synthesis (Yosys/nextpnr)                                     │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Component Architecture
+
+### LiteX SoC Integration
+
+**File:** [`orbtrace/soc.py`](orbtrace/soc.py)
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    OrbSoC (SoCCore)                            │
+│                   System Clock: 75 MHz                         │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │        Clock & Reset Generator (CRG)                     │ │
+│  │  ┌─────────────┬──────────────┬────────────────────┐    │ │
+│  │  │ ECP5PLL     │  ECP5PLL2    │  Phase Control     │    │ │
+│  │  │ (sys/usb)   │  (debug/swo) │  (HyperRAM align)  │    │ │
+│  │  └─────────────┴──────────────┴────────────────────┘    │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │              Bus Interconnects                           │ │
+│  │  ┌─────────────────┬──────────────────────────────────┐ │ │
+│  │  │ Wishbone Bus    │  AXI-Lite Bus                    │ │ │
+│  │  │ (Main system)   │  (USB memory bridge)             │ │ │
+│  │  │                 │                                   │ │ │
+│  │  │ Masters:        │  Master: USB Bridge              │ │ │
+│  │  │ • USB Bridge    │  Clock: usb → sys (CDC)          │ │ │
+│  │  │                 │  Full memory map access           │ │ │
+│  │  │ Slaves:         │                                   │ │ │
+│  │  │ • SPI Flash     │                                   │ │ │
+│  │  │ • HyperRAM      │                                   │ │ │
+│  │  │ • CSR Bus       │                                   │ │ │
+│  │  └─────────────────┴──────────────────────────────────┘ │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │                   Peripherals (CSR)                      │ │
+│  │  ┌──────────┬──────────┬──────────┬──────────┬────────┐ │ │
+│  │  │ LED_Ctrl │Flash_UID │ HyperRAM │ TestIO   │ Reset  │ │ │
+│  │  │ (5 RGB)  │ (Serial) │(IO Delay)│ (GPIO)   │ (CSR)  │ │ │
+│  │  └──────────┴──────────┴──────────┴──────────┴────────┘ │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │              USB Device (LUNA/Amaranth)                  │ │
+│  │  ┌────────────┬─────────────┬──────────────────────────┐│ │
+│  │  │ USB Core   │  Endpoints  │  Request Handlers        ││ │
+│  │  │            │  (Dynamic   │  • ACM (CDC-ACM)         ││ │
+│  │  │ Descriptor │   allocation)│  • Trace (Config)        ││ │
+│  │  │ Management │             │  • Power (Control)        ││ │
+│  │  │            │  EP0: Ctrl  │  • DFU (Firmware)        ││ │
+│  │  │ ULPI PHY   │  EP1-8: Bulk│  • Mem (AXI Bridge)      ││ │
+│  │  │ Interface  │  /Interrupt │  • Serial# (Dynamic)     ││ │
+│  │  └────────────┴─────────────┴──────────────────────────┘│ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │         Debug Subsystem (if with_debug)                  │ │
+│  │  ┌────────────────┬────────────────────────────────────┐ │ │
+│  │  │ CMSIS-DAP      │  Debug Interface (dbgIF.v)         │ │ │
+│  │  │ (Amaranth FSM) │  ├─ swdIF.v (SWD protocol)         │ │ │
+│  │  │                │  └─ jtagIF.v (JTAG protocol)       │ │ │
+│  │  │ Dual protocol: │                                    │ │ │
+│  │  │ • v1 (HID)     │  Commands:                         │ │ │
+│  │  │ • v2 (Bulk)    │  • Connect/Disconnect              │ │ │
+│  │  │                │  • Transfer/TransferBlock          │ │ │
+│  │  │ Posted reads   │  • SWJ/SWD/JTAG sequences          │ │ │
+│  │  └────────────────┴────────────────────────────────────┘ │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │          Trace Subsystem (if with_trace)                 │ │
+│  │  ┌────────────────────────────────────────────────────┐  │ │
+│  │  │  Input Paths:                                      │  │ │
+│  │  │  ┌──────────────────┬──────────────────────────┐  │  │ │
+│  │  │  │ Parallel Trace   │  Serial Wire Output      │  │  │
+│  │  │  │ (traceIF.v)      │  (SWO)                   │  │  │
+│  │  │  │                  │                           │  │  │
+│  │  │  │ • 1/2/4-bit DDR  │  • DDR capture (250MHz)  │  │  │
+│  │  │  │ • Up to 120MHz   │  • Manchester decoder     │  │  │
+│  │  │  │ • Frame assembly │  • NRZ/UART decoder      │  │  │
+│  │  │  └──────────────────┴──────────────────────────┘  │  │ │
+│  │  │                          │                          │  │ │
+│  │  │                          ▼                          │  │ │
+│  │  │  ┌──────────────────────────────────────────────┐  │  │ │
+│  │  │  │   Processing Pipeline (Amaranth)             │  │  │ │
+│  │  │  │                                               │  │  │
+│  │  │  │  TPIUSync → TPIUDemux → Packetizer →         │  │  │
+│  │  │  │  ChecksumAppender → COBSEncoder →            │  │  │
+│  │  │  │  SuperFramer → FIFO(8192) → USB              │  │  │ │
+│  │  │  └──────────────────────────────────────────────┘  │  │ │
+│  │  └────────────────────────────────────────────────────┘  │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │      Target Power Control (if with_target_power)         │ │
+│  │  • VTREF: Reference voltage (1.8V / 3.3V)               │ │
+│  │  • VTPWR: Target power (3.3V / 5.0V)                    │ │
+│  │  • USB control interface                                 │ │
+│  │  • Fault detection                                       │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │            DFU Support (if with_dfu)                     │ │
+│  │  • USB DFU interface                                     │ │
+│  │  • Flash writer integration                              │ │
+│  │  • Bootloader auto-reset                                 │ │
+│  │  • Multiple flash areas                                  │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Component Initialization Sequence
+
+**File:** [`orbtrace/soc.py`](orbtrace/soc.py) - `OrbSoC.__init__()` method
+
+```
+Initialization Order:
+────────────────────
+1. SoCCore.__init__()          # LiteX base initialization
+2. add_wrapper()                # Create Amaranth-Migen bridge
+3. wrapper.connect_domain()     # Clock domain connections
+4. add_flash()                  # SPI Flash controller (LiteSPI)
+5. add_led_ctrl()               # LED controller (5 RGB LEDs)
+6. add_usb()                    # USB device (LUNA stack)
+7. add_usb_serial_number()      # Dynamic S/N from flash UID
+8. add_uart()                   # USB-UART (CDC-ACM)
+9. add_usb_bridge()             # USB memory bridge (AXI-Lite)
+10. [Conditional subsystems]
+    ├─ add_trace()              # If with_trace
+    ├─ add_debug()              # If with_debug
+    ├─ add_cmsis_dap()          # If with_debug
+    ├─ add_target_power()       # If with_target_power
+    ├─ add_dfu()                # If with_dfu
+    ├─ add_reset_csr()          # If with_reset_csr
+    └─ add_test_io()            # If with_test_io
+```
+
