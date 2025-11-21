@@ -641,3 +641,384 @@ Initialization Order:
     └─ add_test_io()            # If with_test_io
 ```
 
+---
+
+## USB Subsystem
+
+### USB Stack Architecture
+
+**Framework:** LUNA USB2 library (Amaranth-based)
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    USB Stack Layers                            │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Layer 4: Application (Python/Amaranth)                       │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  USB Request Handlers                                    │ │
+│  │  • TraceUSBHandler      - Trace configuration            │ │
+│  │  • PowerUSBHandler      - Target power control           │ │
+│  │  • ACMRequestHandler    - CDC-ACM serial                 │ │
+│  │  • DFUHandler           - Firmware update                │ │
+│  │  • MemRequestHandler    - AXI-Lite memory bridge         │ │
+│  │  • USBSerialNumberHandler - Dynamic S/N from flash       │ │
+│  │  • WindowsRequestHandler - WCID descriptor set           │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                              │                                  │
+│                              ▼                                  │
+│  Layer 3: Protocol (LUNA)                                      │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  USBDevice Core                                          │ │
+│  │  • Descriptor management                                 │ │
+│  │  • Control endpoint (EP0)                                │ │
+│  │  • Standard request handling                             │ │
+│  │  • Endpoint allocation                                   │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                              │                                  │
+│                              ▼                                  │
+│  Layer 2: Data Link (LUNA)                                     │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  Endpoint Handlers                                       │ │
+│  │  • USBStreamInEndpoint    - Device → Host               │ │
+│  │  • USBStreamOutEndpoint   - Host → Device               │ │
+│  │  • Stream interfaces with backpressure                   │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                              │                                  │
+│                              ▼                                  │
+│  Layer 1: Physical (ULPI PHY)                                  │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  USB3343 ULPI Transceiver                                │ │
+│  │  • 8-bit ULPI interface                                  │ │
+│  │  • 60 MHz clock generation                               │ │
+│  │  • USB 2.0 High-Speed (480 Mbps)                         │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### USB Interface Configuration
+
+**File:** [`orbtrace/usb_allocator.py`](orbtrace/usb_allocator.py)
+
+| Interface | Class/Sub/Proto | GUID Disc. | Endpoints | Purpose |
+|-----------|----------------|------------|-----------|---------|
+| **CMSIS-DAP v1** | HID (0x03) | Custom | IN/OUT Interrupt (64B) | Debug probe (legacy) |
+| **CMSIS-DAP v2** | Vendor (0xFF/0x00) | `cdb3b5ad-...` | IN/OUT Bulk (512B) | Debug probe (modern) |
+| **Trace** | Vendor (0xFF/0x54/0x10) | 0x0054 | IN Bulk (512B) | Trace streaming |
+| **Control Proxy** | Vendor (0xFF/0x58/0x00) | 0x0058 | None | Trace control |
+| **Target Power** | Vendor (0xFF/0x50/0x00) | 0x0050 | None | VTREF/VTPWR control |
+| **CDC-ACM UART** | CDC (0x02/0x02/0x01) | N/A | IN/OUT Bulk + IN Interrupt | Virtual serial |
+| **DFU** | App (0xFE/0x01/0x02) | 0x8044 | None (Control only) | Firmware update |
+| **Version** | Vendor (0xFF/0x56/0x00) | 0x0056 | None | Version info |
+
+### USB Descriptor Hierarchy
+
+```
+DeviceDescriptor
+├─ VID: 0x1209 (Vendor)
+├─ PID: 0x3443 (ORBTrace) / 0x3442 (DFU Bootloader)
+├─ bcdUSB: 2.1 (BOS descriptor support)
+├─ Manufacturer: "Orbcode"
+├─ Product: "Orbtrace" / "Orbtrace Bootloader"
+└─ Serial Number: Dynamic (Flash UID)
+
+ConfigurationDescriptor
+├─ InterfaceAssociationDescriptor (CDC-ACM)
+│  ├─ bFirstInterface: <comm_if>
+│  ├─ bInterfaceCount: 2
+│  └─ bFunctionClass: 2 (CDC)
+│
+├─ InterfaceDescriptor (CMSIS-DAP v1)
+│  ├─ bInterfaceClass: 0x03 (HID)
+│  ├─ HIDDescriptor
+│  └─ EndpointDescriptor (IN/OUT Interrupt, 64 bytes)
+│
+├─ InterfaceDescriptor (CMSIS-DAP v2)
+│  ├─ bInterfaceClass: 0xFF (Vendor)
+│  └─ EndpointDescriptor (IN/OUT Bulk, 512 bytes)
+│
+├─ InterfaceDescriptor (Trace)
+│  ├─ bInterfaceClass: 0xFF, bInterfaceSubClass: 0x54
+│  └─ EndpointDescriptor (IN Bulk, 512 bytes)
+│
+├─ InterfaceDescriptor (CDC-ACM Communication)
+│  ├─ bInterfaceClass: 0x02, bInterfaceSubClass: 0x02
+│  └─ EndpointDescriptor (IN Interrupt, 512 bytes)
+│
+├─ InterfaceDescriptor (CDC-ACM Data)
+│  ├─ bInterfaceClass: 0x0A (CDC Data)
+│  └─ EndpointDescriptor (IN/OUT Bulk, 512 bytes)
+│
+├─ InterfaceDescriptor (Target Power)
+│  └─ bInterfaceClass: 0xFF, bInterfaceSubClass: 0x50
+│
+└─ InterfaceDescriptor (DFU)
+    └─ bInterfaceClass: 0xFE, bInterfaceSubClass: 0x01
+
+BinaryObjectStore (BOS)
+└─ PlatformDescriptor
+    └─ Microsoft OS 2.0 Descriptor Set
+        ├─ Compatible ID: "WINUSB"
+        └─ Device Interface GUIDs (per interface)
+```
+
+### USB Data Flow Examples
+
+#### Debug Transaction (CMSIS-DAP)
+
+```
+Host → USB OUT EP → Mux(v1/v2) → CDC(usb→sys) → CMSIS-DAP FSM →
+dbgIF → SWD/JTAG → Target
+
+Target → SWD/JTAG → dbgIF → CMSIS-DAP FSM → CDC(sys→usb) →
+Demux(v1/v2) → USB IN EP → Host
+```
+
+#### Trace Streaming
+
+```
+Target → Trace Pins → TraceIF(Verilog) → AsyncFIFO(trace→sync) →
+TPIUDemux → COBS → CDC(sync→usb) → USB IN EP → Host
+```
+
+#### USB Memory Bridge
+
+```
+Host Control Request → MemRequestHandler → AXI-Lite CDC(usb→sys) →
+Wishbone Bus → Memory/CSR
+```
+
+### Windows Compatible ID (WCID) Support
+
+**File:** [`orbtrace/usb_allocator.py`](orbtrace/usb_allocator.py)
+
+**Microsoft OS 2.0 Descriptor Platform:**
+- Automatically generates WCID descriptors for driverless Windows installation
+- Base GUID: `{1c451fbb-0000-426f-bef2-93a89eb65cba}`
+- Discriminator-based GUID allocation (0x0050, 0x0054, 0x0056, etc.)
+- Compatible ID: "WINUSB" for all vendor interfaces
+- Device Interface GUID per interface for application binding
+
+---
+
+## Debug Protocols
+
+### CMSIS-DAP Implementation
+
+**File:** [`orbtrace/debug/cmsis_dap.py`](orbtrace/debug/cmsis_dap.py) - 1,418 lines
+
+**Standard:** ARM CMSIS-DAP v2.1.0
+
+#### Supported Commands
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│              CMSIS-DAP Command Set                             │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ✅ DAP_Info                - Device capabilities              │
+│  ✅ DAP_Connect             - SWD/JTAG connection              │
+│  ✅ DAP_Disconnect          - Disconnect from target           │
+│  ✅ DAP_Transfer            - Single AP/DP register access     │
+│  ✅ DAP_TransferBlock       - Bulk register transfers          │
+│  ✅ DAP_TransferConfigure   - Retry/match configuration        │
+│  ✅ DAP_SWJ_Pins            - Direct pin control               │
+│  ✅ DAP_SWJ_Clock           - Clock frequency setting          │
+│  ✅ DAP_SWJ_Sequence        - Custom bit sequences             │
+│  ✅ DAP_SWD_Configure       - SWD-specific config              │
+│  ✅ DAP_SWD_Sequence        - SWD custom sequences             │
+│  ✅ DAP_JTAG_Configure      - JTAG chain configuration         │
+│  ✅ DAP_JTAG_Sequence       - JTAG custom sequences            │
+│  ✅ DAP_JTAG_IDCODE         - Read JTAG device IDs             │
+│  ✅ DAP_WriteABORT          - Write abort register             │
+│  ✅ DAP_Delay               - Microsecond delays               │
+│  ✅ DAP_ResetTarget         - Target reset                     │
+│  ❌ DAP_SWO_*               - SWO not implemented in DAP       │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+#### CMSIS-DAP State Machine
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                  CMSIS-DAP FSM Architecture                    │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Main FSM:                                                      │
+│  IDLE → RxFirstByte → PacketSwitch → RxParams → Dispatch →    │
+│  [Command Handler] → Response → TxResponse → IDLE             │
+│                                                                 │
+│  Transfer FSM (13 states):                                     │
+│  Setup → GetTfrReq → [GetTfrData] → Execute → CheckACK →     │
+│  HandleResponse → Next/Done                                     │
+│                                                                 │
+│  TransferBlock FSM (12 states):                                │
+│  GetCount → GetTfrReq → Execute → CheckACK → Store/Load →    │
+│  Loop → Done                                                    │
+│                                                                 │
+│  Sequence FSM (9 states):                                      │
+│  GetParams → ProcessBits → Execute → NextCycle → Done         │
+│                                                                 │
+│  Key Features:                                                  │
+│  • Posted Read Optimization                                    │
+│  • WAIT/FAULT retry logic                                      │
+│  • Value match support                                         │
+│  • WideRam buffering (508 bytes)                               │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### SWD (Serial Wire Debug) Protocol
+
+**File:** [`verilog/swdIF.v`](verilog/swdIF.v)
+
+**Standard:** ARM Debug Interface Architecture ADIv5.0-5.2
+
+#### SWD Transaction Format
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                  SWD Transaction Timing                        │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Host Transmits 8-bit Header:                                  │
+│  ┌───┬─────┬───┬─────┬─────┬──────┬────┬────┐                │
+│  │ 1 │AP/DP│R/W│ A2  │ A3  │Parity│ 0  │ 1  │                │
+│  └───┴─────┴───┴─────┴─────┴──────┴────┴────┘                │
+│  Start  1bit  1   Address  Even  Stop Park                    │
+│                           bits            bits                 │
+│                                                                 │
+│  Turnaround (1-4 cycles, configurable)                        │
+│  ────────────                                                  │
+│                                                                 │
+│  Target Transmits 3-bit ACK:                                   │
+│  ┌─────┬─────┬─────┐                                          │
+│  │ Bit0│ Bit1│ Bit2│                                          │
+│  └─────┴─────┴─────┘                                          │
+│   001 = OK    010 = WAIT    100 = FAULT                       │
+│                                                                 │
+│  [If Read] Turnaround + 32-bit Data + Parity                  │
+│  [If Write] Turnaround + Host sends 32-bit Data + Parity      │
+│                                                                 │
+│  Idle Cycles (2-255, configurable)                            │
+│  ──────────────────────────                                   │
+│                                                                 │
+│  Timing Constraints:                                           │
+│  • 10ns < T_high/T_low < 500µs                                │
+│  • Setup time: 4ns minimum                                    │
+│  • Hold time: 1ns minimum                                     │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### JTAG Protocol
+
+**File:** [`verilog/jtagIF.v`](verilog/jtagIF.v)
+
+**Standard:** ARM Debug Interface Architecture ADIv5.0-5.2
+
+#### JTAG TAP State Machine
+
+```
+                Test-Logic-Reset
+                       │
+                       ▼
+                   Run-Test/Idle
+                   ╱           ╲
+                  ▼             ▼
+           Select-DR-Scan   Select-IR-Scan
+              │                   │
+              ▼                   ▼
+          Capture-DR          Capture-IR
+              │                   │
+              ▼                   ▼
+           Shift-DR            Shift-IR
+              │                   │
+              ▼                   ▼
+           Exit1-DR            Exit1-IR
+           ╱      ╲            ╱      ╲
+          ▼        ▼          ▼        ▼
+      Pause-DR  Update-DR  Pause-IR  Update-IR
+          │                   │
+          ▼                   ▼
+      Exit2-DR            Exit2-IR
+          │                   │
+          └─────────┬─────────┘
+                    │
+                    ▼
+             Run-Test/Idle
+```
+
+#### JTAG Chain Support
+
+**File:** [`verilog/jtagIF.v`](verilog/jtagIF.v) - Lines 28-31
+
+- Supports up to 6 devices in JTAG chain
+- Configurable IR lengths per device (5 bits each, packed in 30-bit field)
+- Automatic bypass handling for non-target devices
+- Device index selection (0-7)
+
+```
+Example 3-device chain:
+┌────────┐    ┌────────┐    ┌────────┐
+│Device 0│───►│Device 1│───►│Device 2│
+│ IR=4   │    │ IR=5   │    │ IR=4   │
+└────────┘    └────────┘    └────────┘
+    │             │ Target      │
+    ▼             ▼             ▼
+ Bypass      ARM DAP       Bypass
+```
+
+### Debug Interface Controller (dbgIF)
+
+**File:** [`verilog/dbgIF.v`](verilog/dbgIF.v) - 5,308 lines
+
+**Purpose:** Unified command interface for SWD, JTAG, and mode switching
+
+#### Command Set
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                 dbgIF Command Set (16 commands)                │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  0:  CMD_RESET         - Reset target with timeout             │
+│  1:  CMD_PINS_WRITE    - Direct pin control (SWJ mode)         │
+│  2:  CMD_TRANSACT      - Execute SWD/JTAG transaction          │
+│  3:  CMD_SET_SWD       - Switch to SWD mode                    │
+│  4:  CMD_SET_JTAG      - Switch to JTAG mode                   │
+│  5:  CMD_SET_SWJ       - Switch to manual pin mode             │
+│  6:  CMD_SET_JTAG_CFG  - Configure JTAG chain                  │
+│  7:  CMD_SET_CLK       - Set clock frequency (195kHz-25MHz)    │
+│  8:  CMD_SET_SWD_CFG   - Configure SWD timing                  │
+│  9:  CMD_WAIT          - Delay in microseconds                 │
+│  10: CMD_CLR_ERR       - Clear error flags                     │
+│  11: CMD_SET_RST_TMR   - Configure reset timeout               │
+│  12: CMD_SET_TFR_CFG   - Configure transfer timing             │
+│  13: CMD_JTAG_GET_ID   - Read JTAG IDCODE                      │
+│  14: CMD_JTAG_RESET    - Reset JTAG TAP to Test-Logic-Reset   │
+│  15: CMD_JTAG_REG      - Set JTAG IR register                  │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+#### Mode Switching Sequences
+
+**SWD Mode Entry:**
+```
+1. Send 50+ cycles of '1'
+2. Send magic: 0xE79E (JTAG-to-SWD sequence)
+3. Send 50+ cycles of '1'
+4. Send 2+ cycles of '0'
+```
+
+**JTAG Mode Entry:**
+```
+1. Send 50+ cycles of '1'
+2. Send magic: 0xE73C (SWD-to-JTAG sequence)
+3. Send 50+ cycles of '1'
+4. Send 2+ cycles of '0'
+```
+
