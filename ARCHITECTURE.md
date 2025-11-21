@@ -1022,3 +1022,385 @@ Example 3-device chain:
 4. Send 2+ cycles of '0'
 ```
 
+---
+
+## Trace Subsystem
+
+### Trace Processing Pipeline
+
+**Files:**
+- [`orbtrace/trace/core.py`](orbtrace/trace/core.py) - Pipeline integration
+- [`orbtrace/trace/tpiu.py`](orbtrace/trace/tpiu.py) - TPIU protocol
+- [`orbtrace/trace/swo.py`](orbtrace/trace/swo.py) - SWO decoders
+- [`orbtrace/trace/cobs.py`](orbtrace/trace/cobs.py) - COBS encoding
+- [`orbtrace/trace/orbflow.py`](orbtrace/trace/orbflow.py) - Framing protocol
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Trace Processing Architecture                     │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  Input Sources (Multiple Paths):                                      │
+│  ┌─────────────────────┬──────────────────────────────────────────┐  │
+│  │  Parallel Trace     │  Serial Wire Output (SWO)                │  │
+│  │  ┌───────────────┐  │  ┌────────────┐   ┌─────────────────┐  │  │
+│  │  │ traceIF.v     │  │  │ DDR Capture│──►│ Pulse Length    │  │  │
+│  │  │               │  │  │ (250 MHz)  │   │ Capture (swo2x) │  │  │
+│  │  │• 1/2/4-bit    │  │  └────────────┘   └────────┬────────┘  │  │
+│  │  │• DDR capture  │  │                             │           │  │
+│  │  │• Up to 120MHz │  │                             ▼           │  │
+│  │  │• Frame asm.   │  │         ┌───────────────────────────┐  │  │
+│  │  └───────┬───────┘  │         │ Manchester Decoder  OR    │  │  │
+│  │          │          │         │ NRZ/UART Decoder          │  │  │
+│  │          │          │         │ (swo domain, 125 MHz)     │  │  │
+│  │          │          │         └───────────┬───────────────┘  │  │
+│  │          │          │                     │                   │  │
+│  │          ▼          │                     ▼                   │  │
+│  │   AsyncFIFO(4)     │              AsyncFIFO(16)              │  │
+│  │   (trace→sync)     │              (swo→sync)                 │  │
+│  └─────────┬──────────┴──────────────────────┬──────────────────┘  │
+│            │                                  │                      │
+│            └────────────────┬─────────────────┘                      │
+│                             │                                        │
+│                             ▼                                        │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                   TPIUSync (Sync domain)                     │  │
+│  │  • Searches for sync pattern (0x7FFFFFFF)                   │  │
+│  │  • Aligns to 16-byte frame boundaries                        │  │
+│  └────────────────────────────┬─────────────────────────────────┘  │
+│                                │                                    │
+│                                ▼                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                      TPIUDemux                               │  │
+│  │  ┌────────┬──────────┬──────────────┬─────────────────────┐ │  │
+│  │  │Unmangle│Serializer│ TrackStream  │ StripChannelZero    │ │  │
+│  │  │        │          │              │                     │ │  │
+│  │  │Extract │Array to  │Channel ID    │Filter channel 0     │ │  │
+│  │  │ID bits │elements  │tracking      │(sync packets)       │ │  │
+│  │  └────┬───┴────┬─────┴──────┬───────┴──────┬──────────────┘ │  │
+│  │       │        │            │              │                 │  │
+│  │       └────────┴────────────┴──────────────┘                 │  │
+│  │                             │                                 │  │
+│  │                             ▼                                 │  │
+│  │                     ┌───────────────┐                         │  │
+│  │                     │  Packetizer   │                         │  │
+│  │                     │               │                         │  │
+│  │                     │• Max: 1024B   │                         │  │
+│  │                     │• Timeout: 7.5M│                         │  │
+│  │                     │  cycles       │                         │  │
+│  │                     │• Channel hdr  │                         │  │
+│  │                     └───────┬───────┘                         │  │
+│  └─────────────────────────────┼─────────────────────────────────┘  │
+│                                │                                    │
+│                                ▼                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │              ChecksumAppender (orbflow.py)                   │  │
+│  │  • Running subtraction checksum                              │  │
+│  │  • Appended to packet end                                    │  │
+│  └────────────────────────────┬─────────────────────────────────┘  │
+│                                │                                    │
+│                                ▼                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                    COBSEncoder (cobs.py)                     │  │
+│  │  ┌────────────┬───────┬──────────────┬──────────────────┐   │  │
+│  │  │GroupSplitter│FIFO(L)│GroupCombiner │DelimiterAppender │   │  │
+│  │  │            │FIFO(D)│              │                  │   │  │
+│  │  │Split on 0x00│256-byte│Encode length│Append 0x00       │   │  │
+│  │  └────────────┴───────┴──────────────┴──────────────────┘   │  │
+│  └────────────────────────────┬─────────────────────────────────┘  │
+│                                │                                    │
+│                                ▼                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │              SuperFramer (orbflow.py)                        │  │
+│  │  • Delays 'last' marker until flush                          │  │
+│  │  • Timer: 7.5M cycles (~100ms @ 75MHz)                       │  │
+│  │  • Threshold: 65536 bytes                                    │  │
+│  └────────────────────────────┬─────────────────────────────────┘  │
+│                                │                                    │
+│                                ▼                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │           SyncFIFOBuffered (8192 entries)                    │  │
+│  │  • Large buffering for burst handling                        │  │
+│  └────────────────────────────┬─────────────────────────────────┘  │
+│                                │                                    │
+│                                ▼                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │           ClockDomainCrossing (sync → usb)                   │  │
+│  │  • AsyncFIFO depth: 8                                        │  │
+│  │  • 75 MHz → 60 MHz                                           │  │
+│  └────────────────────────────┬─────────────────────────────────┘  │
+│                                │                                    │
+│                                ▼                                    │
+│                         USB Bulk IN Endpoint                        │
+│                         (512 bytes, High-Speed)                     │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### TPIU (Trace Port Interface Unit)
+
+**Standard:** ARM CoreSight TPIU-Lite r0p0
+
+**Parallel Trace Formats:**
+- **1-bit:** Legacy SWO compatibility
+- **2-bit:** Medium bandwidth
+- **4-bit:** Maximum bandwidth (480 Mbps @ 120 MHz)
+
+**Frame Structure:**
+- 16-byte (128-bit) frames
+- 8 channels multiplexed (7-bit channel ID)
+- Channel 0 reserved for synchronization
+
+**TPIU Processing Steps:**
+
+1. **Unmangle:** Extract ID bits from frame format
+2. **TrackStream:** Maintain channel state and detect switches
+3. **StripChannelZero:** Remove synchronization packets
+4. **Packetizer:** Group by channel with timeout
+
+### SWO (Serial Wire Output)
+
+**Encoding Modes:**
+
+**Manchester Encoding:**
+```
+┌───────────────────────────────────────────────────────────┐
+│              Manchester Encoding Timing                   │
+├───────────────────────────────────────────────────────────┤
+│                                                            │
+│  Bit '0':  ▀▀▀▀▀▀▄▄▄▄▄▄  (High → Low transition)        │
+│                                                            │
+│  Bit '1':  ▄▄▄▄▄▄▀▀▀▀▀▀  (Low → High transition)        │
+│                                                            │
+│  Features:                                                 │
+│  • Self-clocking (no separate clock needed)               │
+│  • Auto-synchronization on transitions                    │
+│  • Adaptive threshold (3/4 and 5/4 bit time)             │
+│  • 250 MHz 2x oversampling for pulse measurement         │
+│                                                            │
+└───────────────────────────────────────────────────────────┘
+```
+
+**NRZ/UART Encoding:**
+```
+┌───────────────────────────────────────────────────────────┐
+│                  UART Frame Format                        │
+├───────────────────────────────────────────────────────────┤
+│                                                            │
+│  ┌────┬───┬───┬───┬───┬───┬───┬───┬───┬────┐            │
+│  │Strt│D0 │D1 │D2 │D3 │D4 │D5 │D6 │D7 │Stop│            │
+│  │ 0  │   │   │   │   │   │   │   │   │ 1  │            │
+│  └────┴───┴───┴───┴───┴───┴───┴───┴───┴────┘            │
+│                                                            │
+│  • Configurable baudrate (via divider)                    │
+│  • 8-bit data, no parity, 1 stop bit (8N1)               │
+│  • 4-bit fractional accumulator for sub-bit timing       │
+│                                                            │
+└───────────────────────────────────────────────────────────┘
+```
+
+### Trace Format Selection
+
+**Configuration:** Via USB vendor request (TraceUSBHandler)
+
+| Format Code | Description | Processing Path |
+|-------------|-------------|----------------|
+| `0x01` | Parallel 1-bit TPIU | traceIF → TPIU → USB |
+| `0x02` | Parallel 2-bit TPIU | traceIF → TPIU → USB |
+| `0x03` | Parallel 4-bit TPIU | traceIF → TPIU → USB |
+| `0x10` | SWO Manchester (bypass) | Manchester → Bytes → USB |
+| `0x11` | SWO Manchester + TPIU | Manchester → TPIU → USB |
+| `0x12` | SWO NRZ (bypass) | NRZ → UART → Bytes → USB |
+| `0x13` | SWO NRZ + TPIU | NRZ → UART → TPIU → USB |
+
+---
+
+## Memory Architecture
+
+### Memory Map
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    Address Space Layout                      │
+├──────────────────────────────────────────────────────────────┤
+│                                                               │
+│  0x00000000 - 0x07FFFFFF   Reserved / Unmapped              │
+│                                                               │
+│  0x08000000 - 0x08FFFFFF   SPI Flash (Memory Mapped)        │
+│                            ┌──────────────────────────────┐  │
+│                            │ Size: 8 MB (S25FL064L)       │  │
+│                            │ Mode: Read-only              │  │
+│                            │ Interface: LiteSPI           │  │
+│                            │ Protocol: Quad SPI (1-1-4)   │  │
+│                            │ Frequency: ~15 MHz           │  │
+│                            │                              │  │
+│                            │ Contents:                    │  │
+│                            │ 0x000000: DFU Bootloader     │  │
+│                            │ 0x100000: Application        │  │
+│                            │ Flash UID: 64-bit unique ID  │  │
+│                            └──────────────────────────────┘  │
+│                                                               │
+│  0x20000000 - 0x207FFFFF   HyperRAM (8 MB)                  │
+│                            ┌──────────────────────────────┐  │
+│                            │ Interface: LiteHyperBus      │  │
+│                            │ Protocol: DDR2x (150 MHz)    │  │
+│                            │ Latency: 7 cycles            │  │
+│                            │ Clock phases:                │  │
+│                            │  • sys (75 MHz)              │  │
+│                            │  • sys2x (150 MHz)           │  │
+│                            │  • sys_90 (75 MHz, 90°)      │  │
+│                            │  • sys2x_90 (150 MHz, 90°)   │  │
+│                            │                              │  │
+│                            │ Calibration:                 │  │
+│                            │  • IO delay: 0-31 taps       │  │
+│                            │  • CLK delay: 0-31 taps      │  │
+│                            │  • 25 ps per tap             │  │
+│                            └──────────────────────────────┘  │
+│                                                               │
+│  0x80000000 - 0x8FFFFFFF   CSR (Control/Status Registers)   │
+│                            ┌──────────────────────────────┐  │
+│                            │ All peripherals accessible   │  │
+│                            │ via memory-mapped registers  │  │
+│                            │                              │  │
+│                            │ Key CSR Modules:             │  │
+│                            │ • CRG (clock control)        │  │
+│                            │ • LED_Ctrl (RGB LEDs)        │  │
+│                            │ • Flash_UID (serial number)  │  │
+│                            │ • HyperRAM (delay cal)       │  │
+│                            │ • TestIO (GPIO)              │  │
+│                            │ • Reset (soft reset)         │  │
+│                            └──────────────────────────────┘  │
+│                                                               │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### SPI Flash Organization
+
+**Device:** Spansion S25FL064L (8 MB)
+
+```
+┌────────────────────────────────────────────────────────┐
+│               SPI Flash Layout                         │
+├────────────────────────────────────────────────────────┤
+│                                                         │
+│  0x000000 ┌─────────────────────────────────────────┐ │
+│           │  DFU Bootloader                         │ │
+│           │  • USB VID:PID = 0x1209:0x3442          │ │
+│           │  • Purple LED indicator                 │ │
+│           │  • Boots application after timeout      │ │
+│  0x0FFFFF └─────────────────────────────────────────┘ │
+│                                                         │
+│  0x100000 ┌─────────────────────────────────────────┐ │
+│           │  Application Bitstream                  │ │
+│           │  • USB VID:PID = 0x1209:0x3443          │ │
+│           │  • Full debug/trace functionality       │ │
+│           │  • Standard entry point                 │ │
+│  0x7FFFFF └─────────────────────────────────────────┘ │
+│                                                         │
+│  Flash UID: 64-bit unique ID read via SPI command     │
+│  Used for: USB serial number generation               │
+│                                                         │
+└────────────────────────────────────────────────────────┘
+```
+
+### HyperRAM Interface
+
+**File:** [`orbtrace/hyperram.py`](orbtrace/hyperram.py)
+
+**Features:**
+- DDR2x operation (300 MT/s effective)
+- Multi-phase clocking for optimal timing
+- CSR-controlled delay calibration
+- Wishbone bus interface
+- Multi-master arbiter support
+
+---
+
+## Clock Domains
+
+**File:** [`orbtrace/crg_ecp5.py`](orbtrace/crg_ecp5.py)
+
+### Clock Generation Architecture
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                  Clock Generation Topology                     │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Input: 30 MHz Oscillator (ORBTrace Mini)                     │
+│         100 MHz Oscillator (ECPIX-5)                           │
+│                    │                                            │
+│                    ▼                                            │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │                    ECP5PLL (Primary)                      │ │
+│  │  Input: 30 MHz                                            │ │
+│  │  VCO: 600 MHz                                             │ │
+│  ├──────────────────────────────────────────────────────────┤ │
+│  │  Outputs:                                                 │ │
+│  │  ├─ sys      (75 MHz, ÷8)   Main system clock            │ │
+│  │  ├─ sys2x    (150 MHz, ÷4)  HyperRAM DDR clock          │ │
+│  │  ├─ sys_90   (75 MHz, ÷8, 90° phase)  HyperRAM sampling │ │
+│  │  ├─ sys2x_90 (150 MHz, ÷4, 90° phase) HyperRAM sampling │ │
+│  │  └─ usb      (60 MHz, ÷10)  USB PHY clock                │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │                   ECP5PLL2 (Secondary)                    │ │
+│  │  Input: 30 MHz                                            │ │
+│  │  VCO: 500 MHz                                             │ │
+│  ├──────────────────────────────────────────────────────────┤ │
+│  │  Outputs:                                                 │ │
+│  │  ├─ debug    (100 MHz, ÷5)  SWD/JTAG interface          │ │
+│  │  ├─ swo      (125 MHz, ÷4)  SWO processing               │ │
+│  │  └─ swo2x    (250 MHz, ÷2)  SWO oversampling (DDR)      │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │              External/Async Clocks                        │ │
+│  ├──────────────────────────────────────────────────────────┤ │
+│  │  • trace     Async from target (up to 120 MHz)          │ │
+│  │  • por       30 MHz (power-on reset domain)              │ │
+│  │  • ulpi_clk  60 MHz from USB PHY (alternative to 'usb')  │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Clock Domain Usage
+
+| Domain | Frequency | Purpose | Subsystems |
+|--------|-----------|---------|------------|
+| **sys** | 75 MHz | Main system | LiteX SoC, Wishbone bus, CSR, trace processing |
+| **sys2x** | 150 MHz | HyperRAM DDR | HyperRAM controller clock output |
+| **sys_90** | 75 MHz (90°) | HyperRAM sampling | HyperRAM data sampling |
+| **sys2x_90** | 150 MHz (90°) | HyperRAM DDR sampling | HyperRAM DDR data sampling |
+| **usb** | 60 MHz | USB operations | LUNA USB stack, endpoints, CDC |
+| **debug** | 100 MHz | Debug interface | dbgIF, swdIF, jtagIF |
+| **swo** | 125 MHz | SWO processing | Manchester/NRZ decoders |
+| **swo2x** | 250 MHz | SWO oversampling | Pulse length capture (DDR) |
+| **trace** | Async (≤120 MHz) | Parallel trace | traceIF, DDR capture |
+| **por** | 30 MHz | Power-on reset | Reset sequencing |
+
+### Dynamic Clock Features
+
+**Dynamic Clock Source Selection (DCSC):**
+```python
+Instance('DCSC',
+    o_DCSOUT = jtdo_swo_clk,
+    i_CLK0 = ClockSignal('debug'),   # JTAG mode
+    i_CLK1 = ClockSignal('swo2x'),   # SWO mode
+    i_SEL0 = self.is_jtag,
+    i_SEL1 = ~self.is_jtag,
+)
+```
+
+**Phase Adjustment (CSR Control):**
+- `_phase_sel`: Select which clock to adjust
+- `_phase_dir`: Direction of phase shift
+- `_phase_step`: Trigger phase step
+- `_phase_load`: Load phase setting
+
+**Clock Alignment (CLKDIVF):**
+- `_slip_hr2x`: Align sys2x clock
+- `_slip_hr2x90`: Align sys2x_90 clock
+
