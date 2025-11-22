@@ -4,7 +4,7 @@ import re
 
 @functools.cache
 def get_version():
-    return subprocess.check_output('git describe --always --long --dirty', shell = True).decode('utf-8').strip()
+    return subprocess.check_output('git describe --tags --always --long --dirty', shell = True).decode('utf-8').strip()
 
 def get_version_bcd():
     m = re.match(r'v(\d{1,2})\.(\d)(?:\.(\d+))?-', get_version())
